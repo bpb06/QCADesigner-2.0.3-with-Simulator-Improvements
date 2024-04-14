@@ -1,0 +1,1995 @@
+diff -r -c src_orig//bistable_simulation.c src_pristine//bistable_simulation.c
+*** src_orig//bistable_simulation.c	2005-06-27 01:15:30.000000000 -0400
+--- src_pristine//bistable_simulation.c	2011-06-29 22:57:40.000000000 -0400
+***************
+*** 43,53 ****
+  #include "custom_widgets.h"
+  #include "global_consts.h"
+  
+- //#define REDUCE_DEREF
+- 
+  //!Options for the bistable simulation engine
+  //This variable is used by multiple source files
+! bistable_OP bistable_options = {12800, FALSE, 1e-3, 65, 12.9, 9.8e-22, 3.8e-23, 0.0, 2.0, 100, 11.5, TRUE} ;
+  
+  #ifdef GTK_GUI
+  extern int STOP_SIMULATION;
+--- 43,51 ----
+  #include "custom_widgets.h"
+  #include "global_consts.h"
+  
+  //!Options for the bistable simulation engine
+  //This variable is used by multiple source files
+! bistable_OP bistable_options = {12800, FALSE, 1e-3, 65, 12.9, 9.8e-22, 3.8e-23, 0.0, 2.0, 1000, 11.5, TRUE} ;
+  
+  #ifdef GTK_GUI
+  extern int STOP_SIMULATION;
+***************
+*** 56,69 ****
+  #endif /* def GTK_GUI */
+  
+  // To each cell this structure is connected in order that this particular simulation engine can have its own variables. //
+! typedef struct
+!   {
+!   int number_of_neighbours;
+!   QCADCell **neighbours;
+!   int *neighbour_layer;
+!   double *Ek;
+!   double polarization;
+!   } bistable_model;
+  
+  static inline double bistable_determine_Ek (QCADCell *cell1, QCADCell *cell2, int layer_separation, bistable_OP *options);
+  static inline void bistable_refresh_all_Ek (int number_of_cell_layers, int *number_of_cells_in_layer, QCADCell ***sorted_cells, bistable_OP *options);
+--- 54,69 ----
+  #endif /* def GTK_GUI */
+  
+  // To each cell this structure is connected in order that this particular simulation engine can have its own variables. //
+! typedef struct {
+!     int number_of_neighbours;
+!     QCADCell **neighbours;
+!     int *neighbour_layer;
+!     double *Ek;
+!     double polarization;
+!     unsigned int clock;
+!     int stable;
+!     int cell_function;
+! } bistable_model;
+  
+  static inline double bistable_determine_Ek (QCADCell *cell1, QCADCell *cell2, int layer_separation, bistable_OP *options);
+  static inline void bistable_refresh_all_Ek (int number_of_cell_layers, int *number_of_cells_in_layer, QCADCell ***sorted_cells, bistable_OP *options);
+***************
+*** 73,115 ****
+  //-------------------------------------------------------------------//
+  simulation_data *run_bistable_simulation (int SIMULATION_TYPE, DESIGN *design, bistable_OP *options, VectorTable *pvt)
+    {
+!   int i, j, k, l, total_cells = 0 ;
+    int icLayers, icCellsInLayer;
+    time_t start_time, end_time;
+!   simulation_data *sim_data = NULL ;
+!   // optimization variables //
+    int number_of_cell_layers = 0, *number_of_cells_in_layer = NULL ;
+!   QCADCell ***sorted_cells = NULL ;
+    double clock_shift = (options->clock_high + options->clock_low)/2 + options->clock_shift;
+    double clock_prefactor = (options->clock_high - options->clock_low) * options->clock_amplitude_factor;
+    double four_pi_over_number_samples = 4.0 * PI / (double) options->number_of_samples;
+    double two_pi_over_number_samples = 2.0 * PI / (double) options->number_of_samples;
+!   int idxMasterBitOrder = -1 ;
+!   int max_iterations_per_sample = ((bistable_OP *)options)->max_iterations_per_sample;
+!   BUS_LAYOUT_ITER bli ;
+! #ifdef REDUCE_DEREF
+!   // For dereference reduction
+!   int sim_data_number_samples = 0, pvt_vectors_icUsed = 0,
+!     design_bus_layout_outputs_icUsed = 0, design_bus_layout_inputs_icUsed = 0, pvt_inputs_icUsed = 0 ;
+!   int number_of_cells_in_current_layer = 0 ;
+!   EXP_ARRAY *pvt_inputs = NULL ;
+!   EXP_ARRAY *pvt_vectors = NULL ;
+!   EXP_ARRAY *design_bus_layout_inputs = NULL ;
+!   EXP_ARRAY *design_bus_layout_outputs = NULL ;
+!   BUS_LAYOUT *design_bus_layout = NULL ;
+! #endif
+!   // For randomization
+!   int Nix, Nix1, idxCell1, idxCell2 ;
+!   QCADCell *swap = NULL ;
+!   // -- these used to be inside run_bistable_iteration -- //
+!   int q, iteration = 0;
+    int stable = FALSE;
+-   double old_polarization;
+-   double new_polarization;
+    double tolerance = ((bistable_OP *)options)->convergence_tolerance;
+    double polarization_math;
+!   bistable_model *current_cell_model = NULL ;
+!   QCADCell *cell;
+  
+    STOP_SIMULATION = FALSE;
+  
+--- 73,112 ----
+  //-------------------------------------------------------------------//
+  simulation_data *run_bistable_simulation (int SIMULATION_TYPE, DESIGN *design, bistable_OP *options, VectorTable *pvt)
+    {
+!   int i, j, k, q, Nix;
+    int icLayers, icCellsInLayer;
++   int idxMasterBitOrder = -1 ;
++   int max_iterations_per_sample = ((bistable_OP *)options)->max_iterations_per_sample;
++   BUS_LAYOUT_ITER bli ;
+    time_t start_time, end_time;
+! 
+!   // optimization variables
+    int number_of_cell_layers = 0, *number_of_cells_in_layer = NULL ;
+!   int number_of_cells;
+    double clock_shift = (options->clock_high + options->clock_low)/2 + options->clock_shift;
+    double clock_prefactor = (options->clock_high - options->clock_low) * options->clock_amplitude_factor;
+    double four_pi_over_number_samples = 4.0 * PI / (double) options->number_of_samples;
+    double two_pi_over_number_samples = 2.0 * PI / (double) options->number_of_samples;
+! 
+!   QCADCell ***sorted_cells = NULL ;
+!   bistable_model *cell_models;
+!   simulation_data *sim_data = NULL ;
+! 
+!   // simulator
+!   int iteration = 0;
+    int stable = FALSE;
+    double tolerance = ((bistable_OP *)options)->convergence_tolerance;
+    double polarization_math;
+!   bistable_model *cell;
+! 
+!   double dPolarization;
+!   int *cell_indices;
+!   double clock_cache[4];
+! 
+!   //number of points to record in simulation results //
+!   //simulations can have millions of points and there is no need to plot them all //
+!   unsigned long int number_recorded_samples = (1 << (design->bus_layout->inputs->icUsed + 1)) * 30;
+!   unsigned long int record_interval;
+  
+    STOP_SIMULATION = FALSE;
+  
+***************
+*** 120,147 ****
+    // Create per-layer cell arrays to be used by the engine
+    simulation_inproc_data_new (design, &number_of_cell_layers, &number_of_cells_in_layer, &sorted_cells) ;
+  
+    for(i = 0; i < number_of_cell_layers; i++)
+      {
+- #ifdef REDUCE_DEREF
+-     number_of_cells_in_current_layer = number_of_cells_in_layer[i] ;
+-     for(j = 0; j < number_of_cells_in_current_layer ; j++)
+- #else
+      for(j = 0; j < number_of_cells_in_layer[i] ; j++)
+- #endif
+        {
+!       // attach the model parameters to each of the simulation cells //
+!       current_cell_model = g_malloc0 (sizeof(bistable_model)) ;
+!       sorted_cells[i][j]->cell_model = current_cell_model;
+! 
+!       // -- Clear the model pointers so they are not dangling -- //
+!       current_cell_model->neighbours = NULL;
+!       current_cell_model->Ek = NULL;
+! 
+!       // -- set polarization in cell model for fixed cells since they are set with actual dot charges by the user -- //
+!       if(QCAD_CELL_FIXED == sorted_cells[i][j]->cell_function)
+!        current_cell_model->polarization = qcad_cell_calculate_polarization(sorted_cells[i][j]);
+  
+!       total_cells++;
+        }
+      }
+  
+--- 117,157 ----
+    // Create per-layer cell arrays to be used by the engine
+    simulation_inproc_data_new (design, &number_of_cell_layers, &number_of_cells_in_layer, &sorted_cells) ;
+  
++   // count the total number of cells
++   number_of_cells = 0;
++   for(i = 0; i < number_of_cell_layers; i++)
++     number_of_cells += number_of_cells_in_layer[i];
++ 
++   // allocate cell model array
++   cell_models = (bistable_model*) g_malloc0( sizeof(bistable_model) * number_of_cells );
++ 
++   // allocate cell indices array
++     cell_indices = (int *) g_malloc0( sizeof(int) * number_of_cells );
++     for( i = 0; i < number_of_cells; i++ ) {
++         cell_indices[i] = i;
++     }
++ 
++   // build cell models
++   k = 0;
+    for(i = 0; i < number_of_cell_layers; i++)
+      {
+      for(j = 0; j < number_of_cells_in_layer[i] ; j++)
+        {
+!         // attach the model parameters to each of the simulation cells //
+!         cell = cell_models + k;
+!         sorted_cells[i][j]->cell_model = cell;
+! 
+!         // copy cell function, clock, and polarization to cell model
+!         cell->polarization = qcad_cell_calculate_polarization(sorted_cells[i][j]);
+!         cell->clock = (sorted_cells[i][j]->cell_options).clock;
+!         cell->cell_function = (sorted_cells[i][j])->cell_function;
+!         cell->stable = 1; // assume stable at first; cells that aren't input or fixed are set to unstable later
+! 
+!         // -- Clear the model pointers so they are not dangling -- //
+!         cell->neighbours = NULL;
+!         cell->Ek = NULL;
+  
+!         k++;
+        }
+      }
+  
+***************
+*** 150,169 ****
+     {
+     for (Nix = 0 ; Nix < pvt->inputs->icUsed ; Nix++)
+       if (!exp_array_index_1d (pvt->inputs, VT_INPUT, Nix).active_flag)
+!        exp_array_index_1d (pvt->inputs, VT_INPUT, Nix).input->cell_function = QCAD_CELL_NORMAL ;
+     }
+  
+    // write message to the command history window //
+!   command_history_message (_("Simulation found %d inputs %d outputs %d total cells\n"), design->bus_layout->inputs->icUsed, design->bus_layout->outputs->icUsed, total_cells) ;
+  
+    command_history_message(_("Starting initialization\n"));
+    set_progress_bar_visible (TRUE) ;
+    set_progress_bar_label (_("Bistable simulation:")) ;
+  
+    // -- Initialize the simualtion data structure -- //
+    sim_data = g_malloc0 (sizeof(simulation_data));
+    sim_data->number_of_traces = design->bus_layout->inputs->icUsed + design->bus_layout->outputs->icUsed;
+!   sim_data->number_samples = options->number_of_samples;
+    sim_data->trace = g_malloc0 (sizeof (struct TRACEDATA) * sim_data->number_of_traces);
+  
+    // create and initialize the inputs into the sim data structure //
+--- 160,188 ----
+     {
+     for (Nix = 0 ; Nix < pvt->inputs->icUsed ; Nix++)
+       if (!exp_array_index_1d (pvt->inputs, VT_INPUT, Nix).active_flag)
+!        ((bistable_model*) exp_array_index_1d (pvt->inputs, VT_INPUT, Nix).input->cell_model)->cell_function = QCAD_CELL_NORMAL ;
+     }
+  
+    // write message to the command history window //
+!   command_history_message (_("Simulation found %d inputs %d outputs %d total cells\n"), design->bus_layout->inputs->icUsed, design->bus_layout->outputs->icUsed, number_of_cells) ;
+  
+    command_history_message(_("Starting initialization\n"));
+    set_progress_bar_visible (TRUE) ;
+    set_progress_bar_label (_("Bistable simulation:")) ;
+  
++     // if the number of samples is larger then the number of recorded samples then change the
++     // time step to ensure only number_recorded_samples is used //
++     if (number_recorded_samples >= options->number_of_samples) {
++         number_recorded_samples = options->number_of_samples;
++         record_interval = 1;
++     } else {
++         record_interval = (unsigned long int)ceil ((double)(options->number_of_samples - 1) / (double)(number_recorded_samples));
++     }
++ 
+    // -- Initialize the simualtion data structure -- //
+    sim_data = g_malloc0 (sizeof(simulation_data));
+    sim_data->number_of_traces = design->bus_layout->inputs->icUsed + design->bus_layout->outputs->icUsed;
+!   sim_data->number_samples = number_recorded_samples;
+    sim_data->trace = g_malloc0 (sizeof (struct TRACEDATA) * sim_data->number_of_traces);
+  
+    // create and initialize the inputs into the sim data structure //
+***************
+*** 198,211 ****
+      if (SIMULATION_TYPE == EXHAUSTIVE_VERIFICATION)
+        for (j = 0; j < sim_data->number_samples; j++)
+          {
+!         sim_data->clock_data[i].data[j] = clock_prefactor * cos (((double)(1 << design->bus_layout->inputs->icUsed)) * (double) j * four_pi_over_number_samples - PI * i / 2) + clock_shift ;
+          sim_data->clock_data[i].data[j] = CLAMP (sim_data->clock_data[i].data[j], options->clock_low, options->clock_high) ;
+          }
+      else
+  //    if (SIMULATION_TYPE == VECTOR_TABLE)
+        for (j = 0; j < sim_data->number_samples; j++)
+          {
+!         sim_data->clock_data[i].data[j] = clock_prefactor * cos (((double)pvt->vectors->icUsed) * (double)j * two_pi_over_number_samples - PI * i / 2) + clock_shift ;
+          sim_data->clock_data[i].data[j] = CLAMP (sim_data->clock_data[i].data[j], options->clock_low, options->clock_high) ;
+          }
+      }
+--- 217,230 ----
+      if (SIMULATION_TYPE == EXHAUSTIVE_VERIFICATION)
+        for (j = 0; j < sim_data->number_samples; j++)
+          {
+!         sim_data->clock_data[i].data[j] = clock_prefactor * cos (((double)(1 << design->bus_layout->inputs->icUsed)) * (double) j * record_interval * four_pi_over_number_samples - PI * i / 2) + clock_shift ;
+          sim_data->clock_data[i].data[j] = CLAMP (sim_data->clock_data[i].data[j], options->clock_low, options->clock_high) ;
+          }
+      else
+  //    if (SIMULATION_TYPE == VECTOR_TABLE)
+        for (j = 0; j < sim_data->number_samples; j++)
+          {
+!         sim_data->clock_data[i].data[j] = clock_prefactor * cos (((double)pvt->vectors->icUsed) * (double)j * record_interval * two_pi_over_number_samples - PI * i / 2) + clock_shift ;
+          sim_data->clock_data[i].data[j] = CLAMP (sim_data->clock_data[i].data[j], options->clock_low, options->clock_high) ;
+          }
+      }
+***************
+*** 213,235 ****
+    // -- refresh all the kink energies to all the cells neighbours within the radius of effect -- //
+    bistable_refresh_all_Ek (number_of_cell_layers, number_of_cells_in_layer, sorted_cells, options);
+  
+-   // randomize the cells in the design so as to minimize any numerical problems associated //
+-   // with having cells simulated in some predefined order. //
+-   // randomize the order in which the cells are simulated //
+-   //if (options->randomize_cells)
+-   // for each layer ...
+-   for (Nix = 0 ; Nix < number_of_cell_layers ; Nix++)
+-     // ...perform as many swaps as there are cells therein
+-     for (Nix1 = 0 ; Nix1 < number_of_cells_in_layer[Nix] ; Nix1++)
+-       {
+-       idxCell1 = rand () % number_of_cells_in_layer[Nix] ;
+-       idxCell2 = rand () % number_of_cells_in_layer[Nix] ;
+- 
+-       swap = sorted_cells[Nix][idxCell1] ;
+-       sorted_cells[Nix][idxCell1] = sorted_cells[Nix][idxCell2] ;
+-       sorted_cells[Nix][idxCell2] = swap ;
+-       }
+- 
+    // -- get and print the total initialization time -- //
+    if((end_time = time (NULL)) < 0)
+       fprintf(stderr, "Could not get end time\n");
+--- 232,237 ----
+***************
+*** 241,288 ****
+    set_progress_bar_fraction (0.0) ;
+  
+    // perform the iterations over all samples //
+! #ifdef REDUCE_DEREF
+!   // Dereference some structures now so we don't do it over and over in the loop
+!   sim_data_number_samples = sim_data->number_samples ;
+!   pvt_inputs = pvt->inputs ;
+!   pvt_inputs_icUsed = pvt_inputs->icUsed ;
+!   pvt_vectors = pvt->vectors ;
+!   pvt_vectors_icUsed = pvt->vectors->icUsed ;
+!   design_bus_layout = design->bus_layout ;
+!   design_bus_layout_inputs = design_bus_layout->inputs ;
+!   design_bus_layout_inputs_icUsed = design_bus_layout_inputs->icUsed ;
+!   design_bus_layout_outputs = design_bus_layout->outputs ;
+!   design_bus_layout_outputs_icUsed = design_bus_layout_outputs->icUsed ;
+! #else
+!   #define sim_data_number_samples sim_data->number_samples
+!   #define pvt_inputs pvt->inputs
+!   #define pvt_inputs_icUsed pvt_inputs->icUsed
+!   #define pvt_vectors pvt->vectors
+!   #define pvt_vectors_icUsed pvt->vectors->icUsed
+!   #define design_bus_layout design->bus_layout
+!   #define design_bus_layout_inputs design_bus_layout->inputs
+!   #define design_bus_layout_inputs_icUsed design_bus_layout_inputs->icUsed
+!   #define design_bus_layout_outputs design_bus_layout->outputs
+!   #define design_bus_layout_outputs_icUsed design_bus_layout_outputs->icUsed
+! #endif
+!   for (j = 0; j < sim_data_number_samples ; j++)
+      {
+!     if (j % 10 == 0)
+        {
+        // write the completion percentage to the command history window //
+!       set_progress_bar_fraction ((float) j / (float) sim_data_number_samples) ;
+        // redraw the design if the user wants it to appear animated //
+        if(options->animate_simulation)
+          {
+          // update the charges to reflect the polarizations so that they can be animated //
+          for(icLayers = 0; icLayers < number_of_cell_layers; icLayers++)
+            {
+- #ifdef REDUCE_DEREF
+-           number_of_cells_in_current_layer = number_of_cells_in_layer[icLayers] ;
+-           for(icCellsInLayer = 0; icCellsInLayer < number_of_cells_in_current_layer; icCellsInLayer++)
+- #else
+            for(icCellsInLayer = 0; icCellsInLayer < number_of_cells_in_layer[icLayers]; icCellsInLayer++)
+- #endif
+              qcad_cell_set_polarization(sorted_cells[icLayers][icCellsInLayer],((bistable_model *)sorted_cells[icLayers][icCellsInLayer]->cell_model)->polarization);
+            }
+  #ifdef DESIGNER
+--- 243,261 ----
+    set_progress_bar_fraction (0.0) ;
+  
+    // perform the iterations over all samples //
+!   for (j = 0; j < options->number_of_samples; j++)
+      {
+!     if (j % 200 == 0)
+        {
+        // write the completion percentage to the command history window //
+!       set_progress_bar_fraction ( (float) j / (float) options->number_of_samples );
+        // redraw the design if the user wants it to appear animated //
+        if(options->animate_simulation)
+          {
+          // update the charges to reflect the polarizations so that they can be animated //
+          for(icLayers = 0; icLayers < number_of_cell_layers; icLayers++)
+            {
+            for(icCellsInLayer = 0; icCellsInLayer < number_of_cells_in_layer[icLayers]; icCellsInLayer++)
+              qcad_cell_set_polarization(sorted_cells[icLayers][icCellsInLayer],((bistable_model *)sorted_cells[icLayers][icCellsInLayer]->cell_model)->polarization);
+            }
+  #ifdef DESIGNER
+***************
+*** 292,427 ****
+          }
+        }
+  
+!     // -- for each of the (VECTOR_TABLE => active?) inputs -- //
+!     if (EXHAUSTIVE_VERIFICATION == SIMULATION_TYPE)
+!       for (idxMasterBitOrder = 0, design_bus_layout_iter_first (design_bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i), idxMasterBitOrder++)
+!         ((bistable_model *)exp_array_index_1d (design_bus_layout_inputs, BUS_LAYOUT_CELL, i).cell->cell_model)->polarization =
+!           sim_data->trace[i].data[j] = (-1 * sin (((double)(1 << idxMasterBitOrder)) * (double)j * FOUR_PI / (double)sim_data_number_samples) > 0) ? 1 : -1 ;
+!     else
+! //    if (VECTOR_TABLE == SIMULATION_TYPE)
+!       for (design_bus_layout_iter_first (design_bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!         if (exp_array_index_1d (pvt_inputs, VT_INPUT, i).active_flag)
+!           ((bistable_model *)exp_array_index_1d (pvt_inputs, VT_INPUT, i).input->cell_model)->polarization =
+!             sim_data->trace[i].data[j] = exp_array_index_2d (pvt_vectors, gboolean, (j * pvt_vectors_icUsed) / sim_data_number_samples, i) ? 1 : -1 ;
+  
+      // randomize the order in which the cells are simulated to try and minimize numerical errors
+!     // associated with the imposed simulation order.
+!     if(options->randomize_cells)
+!       // for each layer ...
+!       for (Nix = 0 ; Nix < number_of_cell_layers ; Nix++)
+!         {
+!         // ...perform as many swaps as there are cells therein
+! #ifdef REDUCE_DEREF
+!         number_of_cells_in_current_layer = number_of_cells_in_layer[Nix] ;
+!         for (Nix1 = 0 ; Nix1 < number_of_cells_in_current_layer ; Nix1++)
+! #else
+!         for (Nix1 = 0 ; Nix1 < number_of_cells_in_layer[Nix] ; Nix1++)
+! #endif
+!           {
+! #ifdef REDUCE_DEREF
+!           idxCell1 = rand () % number_of_cells_in_current_layer ;
+!           idxCell2 = rand () % number_of_cells_in_current_layer ;
+! #else
+!           idxCell1 = rand () % number_of_cells_in_layer[Nix] ;
+!           idxCell2 = rand () % number_of_cells_in_layer[Nix] ;
+! #endif
+! 
+!           swap = sorted_cells[Nix][idxCell1] ;
+!           sorted_cells[Nix][idxCell1] = sorted_cells[Nix][idxCell2] ;
+!           sorted_cells[Nix][idxCell2] = swap ;
+!           }
+          }
+  
+      // -- run the iteration with the given clock value -- //
+      // -- iterate until the entire design has stabalized -- //
+      iteration = 0;
+!     stable = FALSE;
+!     while (!stable && iteration < max_iterations_per_sample)
+!       {
+!       iteration++;
+!       // -- assume that the circuit is stable -- //
+!       stable = TRUE;
+  
+!       for (icLayers = 0; icLayers < number_of_cell_layers; icLayers++)
+!         {
+! #ifdef REDUCE_DEREF
+!         number_of_cells_in_current_layer = number_of_cells_in_layer[icLayers] ;
+!         for (icCellsInLayer = 0 ; icCellsInLayer < number_of_cells_in_current_layer ; icCellsInLayer++)
+! #else
+!         for (icCellsInLayer = 0 ; icCellsInLayer < number_of_cells_in_layer[icLayers] ; icCellsInLayer++)
+! #endif
+!           {
+!           cell = sorted_cells[icLayers][icCellsInLayer] ;
+  
+!           if (!((QCAD_CELL_INPUT == cell->cell_function)||
+!                 (QCAD_CELL_FIXED == cell->cell_function)))
+!             {
+!             current_cell_model = ((bistable_model *)cell->cell_model) ;
+!             old_polarization = current_cell_model->polarization;
+              polarization_math = 0;
+  
+!             for (q = 0; q < current_cell_model->number_of_neighbours; q++)
+!               polarization_math += (current_cell_model->Ek[q] * ((bistable_model *)current_cell_model->neighbours[q]->cell_model)->polarization) ;
+! 
+!             // math = math / 2 * gamma
+!             polarization_math /= (2.0 * sim_data->clock_data[cell->cell_options.clock].data[j]);
+  
+!             // -- calculate the new cell polarization -- //
+!             // if math < 0.05 then math/sqrt(1+math^2) ~= math with error <= 4e-5
+!             // if math > 100 then math/sqrt(1+math^2) ~= +-1 with error <= 5e-5
+!             new_polarization =
+!               (polarization_math        >  1000.0)   ?  1                 :
+!               (polarization_math        < -1000.0)   ? -1                 :
+!               (fabs (polarization_math) <     0.001) ?  polarization_math :
+!                 polarization_math / sqrt (1 + polarization_math * polarization_math) ;
+  
+              // -- set the polarization of this cell -- //
+!             current_cell_model->polarization = new_polarization;
+  
+!             // If any cells polarization has changed beyond this threshold
+!             // then the entire circuit is assumed to have not converged.
+!             stable = (fabs (new_polarization - old_polarization) <= tolerance) ;
+              }
+-           }
+          }
+-       }//WHILE !STABLE
+  
+!     if (VECTOR_TABLE == SIMULATION_TYPE)
+!       for (design_bus_layout_iter_first (design_bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!         if (!exp_array_index_1d (pvt_inputs, VT_INPUT, i).active_flag)
+!           sim_data->trace[i].data[j] = ((bistable_model *)exp_array_index_1d (pvt_inputs, VT_INPUT, i).input->cell_model)->polarization;
+! 
+!     // -- collect all the output data from the simulation -- //
+!     for (design_bus_layout_iter_first (design_bus_layout, &bli, QCAD_CELL_OUTPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!       sim_data->trace[design_bus_layout_inputs_icUsed + i].data[j] = ((bistable_model *)exp_array_index_1d (design_bus_layout_outputs, BUS_LAYOUT_CELL, i).cell->cell_model)->polarization;
+  
+      // -- if the user wants to stop the simulation then exit. -- //
+      if(TRUE == STOP_SIMULATION)
+!       j = sim_data_number_samples ;
+!     }//for number of samples
+  
+    // Free the neigbours and Ek array introduced by this simulation//
+!   for (k = 0; k < number_of_cell_layers; k++)
+      {
+! #ifdef REDUCE_DEREF
+!     number_of_cells_in_current_layer = number_of_cells_in_layer[k] ;
+!     for (l = 0 ; l < number_of_cells_in_current_layer ; l++)
+! #else
+!     for (l = 0 ; l < number_of_cells_in_layer[k] ; l++)
+! #endif
+        {
+!       g_free(((bistable_model *)sorted_cells[k][l]->cell_model)->neighbours);
+!       g_free(((bistable_model *)sorted_cells[k][l]->cell_model)->neighbour_layer);
+!       g_free(((bistable_model *)sorted_cells[k][l]->cell_model)->Ek);
+        }
+      }
+  
+    simulation_inproc_data_free (&number_of_cell_layers, &number_of_cells_in_layer, &sorted_cells) ;
+  
+! // Restore the input flag for the inactive inputs
+!   if (VECTOR_TABLE == SIMULATION_TYPE)
+!     for (i = 0 ; i < pvt_inputs_icUsed ; i++)
+!       exp_array_index_1d (pvt_inputs, VT_INPUT, i).input->cell_function = QCAD_CELL_INPUT ;
+  
+  // -- get and print the total simulation time -- //
+    if ((end_time = time (NULL)) < 0)
+--- 265,432 ----
+          }
+        }
+  
+!     if (EXHAUSTIVE_VERIFICATION == SIMULATION_TYPE) {
+!         for (idxMasterBitOrder = 0, design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i), idxMasterBitOrder++) {
+!             dPolarization = (-1 * sin (((double)(1 << idxMasterBitOrder)) * (double)j * FOUR_PI / (double)options->number_of_samples) > 0) ? 1 : -1;
+!             ((bistable_model *)exp_array_index_1d (design->bus_layout->inputs, BUS_LAYOUT_CELL, i).cell->cell_model)->polarization = dPolarization;
+!             if (0 == j % record_interval)
+!                 sim_data->trace[i].data[j/record_interval] = dPolarization ;
+!         }
+!     } else { //    if (VECTOR_TABLE == SIMULATION_TYPE)
+!         for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i)) {
+!             if (exp_array_index_1d (pvt->inputs, VT_INPUT, i).active_flag) {
+!                 dPolarization = exp_array_index_2d (pvt->vectors, gboolean, (j * pvt->vectors->icUsed) / options->number_of_samples, i) ? 1 : -1;
+!                 ((bistable_model *)exp_array_index_1d (pvt->inputs, VT_INPUT, i).input->cell_model)->polarization = dPolarization;
+!                 if (0 == j % record_interval)
+!                     sim_data->trace[i].data[j/record_interval] = dPolarization ;
+!             }
+!         }
+!     }
+  
+      // randomize the order in which the cells are simulated to try and minimize numerical errors
+!     // associated with the imposed simulation order (fisher-yates algorithm)
+!     if( options->randomize_cells ) {
+!         for( i = number_of_cells; i--; ) {
+!             k = rand() % (i+1);
+! 
+!             q = cell_indices[k];
+!             cell_indices[k] = cell_indices[i];
+!             cell_indices[i] = q;
+          }
++     }
++ 
++     // build clock cache for this iteration
++     if (SIMULATION_TYPE == EXHAUSTIVE_VERIFICATION) {
++         for( i = 0; i < 4; i++ ) {
++             clock_cache[i] = clock_prefactor * cos (((double)(1 << design->bus_layout->inputs->icUsed)) * (double) j * four_pi_over_number_samples - PI * i / 2) + clock_shift ;
++             clock_cache[i] = CLAMP (clock_cache[i], options->clock_low, options->clock_high);
++             clock_cache[i] = 0.5 / clock_cache[i];
++         }
++     } else {
++         for( i = 0; i < 4; i++ ) {
++             clock_cache[i] = clock_prefactor * cos (((double)pvt->vectors->icUsed) * (double)j * two_pi_over_number_samples - PI * i / 2) + clock_shift ;
++             clock_cache[i] = CLAMP (clock_cache[i], options->clock_low, options->clock_high) ;
++             clock_cache[i] = 0.5 / clock_cache[i];
++         }
++     }
+  
+      // -- run the iteration with the given clock value -- //
+      // -- iterate until the entire design has stabalized -- //
+      iteration = 0;
+!     stable = TRUE;
+  
+!     // initial iteration to determinte stability of each cell
+!     for( i = 0; i < number_of_cells; i++ ) {
+!         cell = cell_models + cell_indices[i];
+  
+!         if ( cell->cell_function != QCAD_CELL_INPUT && cell->cell_function != QCAD_CELL_FIXED ) {
+              polarization_math = 0;
++             for (q = 0 ; q < cell->number_of_neighbours; q++)
++                 polarization_math += ((bistable_model*) cell->neighbours[q]->cell_model)->polarization * cell->Ek[q];
+  
+!             polarization_math *= clock_cache[cell->clock];
+!             if( polarization_math > 1000.0 ) {
+!                 polarization_math = 1;
+!             } else if( polarization_math < -1000.0 ) {
+!                 polarization_math = -1;
+!             } else if( fabs( polarization_math ) > 0.001 ) {
+!                 polarization_math /= sqrt (1 + polarization_math * polarization_math);
+!             }
+  
+!             // If any cells polarization has changed beyond this threshold
+!             // then the entire circuit is assumed to have not converged.
+!             cell->stable = (fabs (polarization_math - cell->polarization) <= tolerance);
+!             stable = stable && cell->stable;
+  
+              // -- set the polarization of this cell -- //
+!             cell->polarization = polarization_math;
+!         }
+!     }
+!     // do more iterations until the entire design is stable
+!     while( !stable ) {
+!         if( iteration > max_iterations_per_sample ) {
+!             command_history_message( "Warning: Simulator did not fully converge, consider increasing max iterations per sample or convergence tolerance\n" );
+!             break;
+!         }
+  
+!         // -- assume that the circuit is stable -- //
+!         stable = TRUE;
+!         for( i = 0; i < number_of_cells; i++ ) {
+!             cell = cell_models + cell_indices[i];
+! 
+!             if ( !cell->stable ) {
+!                 polarization_math = 0;
+!                 for (q = 0 ; q < cell->number_of_neighbours; q++)
+!                     polarization_math += ((bistable_model*) cell->neighbours[q]->cell_model)->polarization * cell->Ek[q];
+! 
+!                 polarization_math *= clock_cache[cell->clock];
+!                 if( polarization_math > 1000.0 ) {
+!                     polarization_math = 1;
+!                 } else if( polarization_math < -1000.0 ) {
+!                     polarization_math = -1;
+!                 } else if( fabs( polarization_math ) > 0.001 ) {
+!                     polarization_math /= sqrt (1 + polarization_math * polarization_math);
+!                 }
+! 
+!                 // update cell stability
+!                 if( (fabs (polarization_math - cell->polarization) <= tolerance) ) {
+!                     cell->stable = 1;
+!                 } else {
+!                     // If any cells polarization has changed beyond the threshold
+!                     // then the entire circuit is assumed to have not converged.
+!                     stable = FALSE;
+! 
+!                     // if this cell is unstable, none of its neighbours are either, so set them to unstable
+!                     for (q = 0 ; q < cell->number_of_neighbours; q++) {
+!                         if( ((bistable_model*) cell->neighbours[q]->cell_model)->cell_function != QCAD_CELL_INPUT &&
+!                             ((bistable_model*) cell->neighbours[q]->cell_model)->cell_function != QCAD_CELL_FIXED ) {
+!                             ((bistable_model*) cell->neighbours[q]->cell_model)->stable = 0;
+!                         }
+!                     }
+!                 }
+! 
+!                 // set the polarization of this cell
+!                 cell->polarization = polarization_math;
+              }
+          }
+  
+!         iteration++;
+!       } // while !stable
+! 
+!     if (0 == j % record_interval) {
+!         if (VECTOR_TABLE == SIMULATION_TYPE)
+!           for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!             if (!exp_array_index_1d (pvt->inputs, VT_INPUT, i).active_flag)
+!               sim_data->trace[i].data[j/record_interval] = ((bistable_model *)exp_array_index_1d (pvt->inputs, VT_INPUT, i).input->cell_model)->polarization;
+! 
+!         // -- collect all the output data from the simulation -- //
+!         for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_OUTPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!           sim_data->trace[design->bus_layout->inputs->icUsed + i].data[j/record_interval] = ((bistable_model *)exp_array_index_1d (design->bus_layout->outputs, BUS_LAYOUT_CELL, i).cell->cell_model)->polarization;
+!     }
+  
+      // -- if the user wants to stop the simulation then exit. -- //
+      if(TRUE == STOP_SIMULATION)
+!       j = sim_data->number_samples;
+! 
+!     } // for number of samples
+  
+    // Free the neigbours and Ek array introduced by this simulation//
+!   for (i = 0; i < number_of_cell_layers; i++)
+      {
+!     for (j = 0 ; j < number_of_cells_in_layer[i] ; j++)
+        {
+!       g_free(((bistable_model *)sorted_cells[i][j]->cell_model)->neighbours);
+!       g_free(((bistable_model *)sorted_cells[i][j]->cell_model)->neighbour_layer);
+!       g_free(((bistable_model *)sorted_cells[i][j]->cell_model)->Ek);
+!       sorted_cells[i][j]->cell_model = NULL;
+        }
+      }
+  
+    simulation_inproc_data_free (&number_of_cell_layers, &number_of_cells_in_layer, &sorted_cells) ;
+  
+!   // free cell models
+!   g_free( cell_models );
+!   g_free( cell_indices );
+  
+  // -- get and print the total simulation time -- //
+    if ((end_time = time (NULL)) < 0)
+***************
+*** 431,449 ****
+  
+    set_progress_bar_visible (FALSE) ;
+  
+- #ifndef REDUCE_DEREF
+-   #undef sim_data_number_samples
+-   #undef pvt_inputs
+-   #undef pvt_inputs_icUsed
+-   #undef pvt_vectors
+-   #undef pvt_vectors_icUsed
+-   #undef design_bus_layout
+-   #undef design_bus_layout_inputs
+-   #undef design_bus_layout_inputs_icUsed
+-   #undef design_bus_layout_outputs
+-   #undef design_bus_layout_outputs_icUsed
+- #endif
+- 
+    return sim_data;
+    }//run_bistable
+  
+--- 436,441 ----
+***************
+*** 456,468 ****
+    int icNeighbours = 0 ;
+    bistable_model *cell_model = NULL ;
+    int i, j, k, idx = 0, total_number_of_cells = 0;
+- #ifdef REDUCE_DEREF
+-   // dereference reduction variables
+    double radius_of_effect = ((bistable_OP *)options)->radius_of_effect ;
+-   int number_of_cells_in_current_layer = 0 ;
+- #else
+-   #define radius_of_effect ((bistable_OP *)options)->radius_of_effect
+- #endif
+  
+    for(i = 0; i < number_of_cell_layers; i++)
+      total_number_of_cells+= number_of_cells_in_layer[i];
+--- 448,454 ----
+***************
+*** 470,491 ****
+    // calculate the Ek for each cell //
+    for(i = 0; i < number_of_cell_layers; i++)
+      {
+- #ifdef REDUCE_DEREF
+-     number_of_cells_in_current_layer = number_of_cells_in_layer[i] ;
+-     for(j = 0 ; j < number_of_cells_in_current_layer ; j++)
+- #else
+      for(j = 0 ; j < number_of_cells_in_layer[i] ; j++)
+- #endif
+        {
+        if (0 == (idx++) % 100)
+          set_progress_bar_fraction((double)idx / (double)total_number_of_cells);
+  
+        cell_model = (bistable_model *)sorted_cells[i][j]->cell_model ;
+- 
+-       // free up memory for cell model variables //
+-       g_free (cell_model->neighbours);
+-       g_free (cell_model->Ek);
+-       g_free (cell_model->neighbour_layer);
+        cell_model->neighbours = NULL;
+        cell_model->neighbour_layer = NULL;
+        cell_model->Ek = NULL;
+--- 456,467 ----
+***************
+*** 512,520 ****
+          }
+        }
+      }
+- #ifndef REDUCE_DEREF
+-   #undef radius_of_effect
+- #endif
+    }//refresh_all_Ek
+  
+  //-------------------------------------------------------------------//
+--- 488,493 ----
+diff -r -c src_orig//bus_layout_dialog.c src_pristine//bus_layout_dialog.c
+*** src_orig//bus_layout_dialog.c	2005-07-26 04:42:23.000000000 -0400
+--- src_pristine//bus_layout_dialog.c	2011-06-29 23:37:37.363730151 -0400
+***************
+*** 1169,1175 ****
+    return tview ;
+    }
+  
+! gboolean gtk_tree_model_iter_next_dfs (GtkTreeModel *model, GtkTreeIter *itr)
+    {
+    GtkTreeIter itrTree ;
+  
+--- 1169,1176 ----
+    return tview ;
+    }
+  
+! // replaced with gtk_model_iter_next as this was causing segfaults
+! /*gboolean gtk_tree_model_iter_next_dfs (GtkTreeModel *model, GtkTreeIter *itr)
+    {
+    GtkTreeIter itrTree ;
+  
+***************
+*** 1197,1203 ****
+        memcpy (itr, &itrTree, sizeof (GtkTreeIter)) ;
+      }
+    return TRUE ;
+!   }
+  
+  void bus_layout_tree_model_dump (GtkTreeModel *model, FILE *pfile)
+    {
+--- 1198,1204 ----
+        memcpy (itr, &itrTree, sizeof (GtkTreeIter)) ;
+      }
+    return TRUE ;
+!   }*/
+  
+  void bus_layout_tree_model_dump (GtkTreeModel *model, FILE *pfile)
+    {
+diff -r -c src_orig//bus_layout_dialog.h src_pristine//bus_layout_dialog.h
+*** src_orig//bus_layout_dialog.h	2005-07-26 03:39:07.000000000 -0400
+--- src_pristine//bus_layout_dialog.h	2011-06-29 23:31:51.483247053 -0400
+***************
+*** 39,45 ****
+  
+  void get_bus_layout_from_user (GtkWindow *parent, BUS_LAYOUT *bus_layout) ;
+  GtkWidget *create_bus_layout_tree_view (gboolean bColsVisible, char *pszColumnTitle, GtkSelectionMode sel_mode) ;
+! gboolean gtk_tree_model_iter_next_dfs (GtkTreeModel *model, GtkTreeIter *itr) ;
+  void bus_layout_tree_model_dump (GtkTreeModel *model, FILE *pfile) ;
+  
+  #endif /* _BUS_LAYOUT_DIALOG_H_ */
+--- 39,50 ----
+  
+  void get_bus_layout_from_user (GtkWindow *parent, BUS_LAYOUT *bus_layout) ;
+  GtkWidget *create_bus_layout_tree_view (gboolean bColsVisible, char *pszColumnTitle, GtkSelectionMode sel_mode) ;
+! 
+! // HACK ALERT:
+! // using gtk_tree_model_iter_next instead of gtk_tree_model_iter_next_dfs fixes a lot of segfaults and seems to still work fine
+! // BUT the implications of this change are unkown, consider looking into this more carefully
+! //gboolean gtk_tree_model_iter_next_dfs (GtkTreeModel *model, GtkTreeIter *itr) ;
+! #define gtk_tree_model_iter_next_dfs gtk_tree_model_iter_next
+  void bus_layout_tree_model_dump (GtkTreeModel *model, FILE *pfile) ;
+  
+  #endif /* _BUS_LAYOUT_DIALOG_H_ */
+diff -r -c src_orig//callbacks.c src_pristine//callbacks.c
+*** src_orig//callbacks.c	2005-07-26 03:39:07.000000000 -0400
+--- src_pristine//callbacks.c	2011-06-29 23:40:45.393992774 -0400
+***************
+*** 1595,1601 ****
+    world_y = CLAMP (world_y, world_y1, world_y2) ;
+  
+    set_ruler_scale (GTK_RULER (main_window.horizontal_ruler), world_x1, world_x2) ;
+!   set_ruler_scale (GTK_RULER (main_window.horizontal_ruler), world_y1, world_y2) ;
+  
+    gtk_ruler_set_range (GTK_RULER (main_window.horizontal_ruler), world_x1, world_x2, world_x, world_x2) ;
+    gtk_ruler_set_range (GTK_RULER (main_window.vertical_ruler), world_y1, world_y2, world_y, world_y2) ;
+--- 1595,1601 ----
+    world_y = CLAMP (world_y, world_y1, world_y2) ;
+  
+    set_ruler_scale (GTK_RULER (main_window.horizontal_ruler), world_x1, world_x2) ;
+!   set_ruler_scale (GTK_RULER (main_window.vertical_ruler), world_y1, world_y2) ;
+  
+    gtk_ruler_set_range (GTK_RULER (main_window.horizontal_ruler), world_x1, world_x2, world_x, world_x2) ;
+    gtk_ruler_set_range (GTK_RULER (main_window.vertical_ruler), world_y1, world_y2, world_y, world_y2) ;
+***************
+*** 2154,2160 ****
+    QCADDesignObject *obj = NULL, *anchor = NULL ;
+    GList *llIter = NULL, *llNext = NULL ;
+  
+!   for(idx = layer_mappings->icUsed - 1; idx > - 1; idx--)
+      {
+      layer_mapping = &(exp_array_index_1d (layer_mappings, LAYER_MAPPING, idx)) ;
+      if(NULL == layer_mapping->design_layer)
+--- 2154,2160 ----
+    QCADDesignObject *obj = NULL, *anchor = NULL ;
+    GList *llIter = NULL, *llNext = NULL ;
+  
+!   for(idx = 0; idx < layer_mappings->icUsed; idx++)
+      {
+      layer_mapping = &(exp_array_index_1d (layer_mappings, LAYER_MAPPING, idx)) ;
+      if(NULL == layer_mapping->design_layer)
+diff -r -c src_orig//coherence_vector.c src_pristine//coherence_vector.c
+*** src_orig//coherence_vector.c	2005-05-29 03:53:15.000000000 -0400
+--- src_pristine//coherence_vector.c	2011-06-29 22:50:01.000000000 -0400
+***************
+*** 40,48 ****
+    #include "callback_helpers.h"
+  #endif /* def GTK_GUI */
+  
+  // Calculates the magnitude of the 3D energy vector
+! #define magnitude_energy_vector(P,G) (hypot(2*(G), (P)) * over_hbar)
+! //(sqrt((4.0*(G)*(G) + (P)*(P))*over_hbar_sqr))
+  // Calculates the temperature ratio
+  #define temp_ratio(P,G,T) (hypot((G),(P)*0.5)/((T) * kB))
+  
+--- 40,50 ----
+    #include "callback_helpers.h"
+  #endif /* def GTK_GUI */
+  
++ #define CONVERGENCE_TOLERANCE 1e7
++ 
+  // Calculates the magnitude of the 3D energy vector
+! //#define magnitude_energy_vector(P,G) (hypot(2*(G), (P)) * over_hbar)
+! #define magnitude_energy_vector(P,G) (sqrt((4.0*(G)*(G) + (P)*(P))*over_hbar_sqr)) // this way is faster, although more susceptible to overflow
+  // Calculates the temperature ratio
+  #define temp_ratio(P,G,T) (hypot((G),(P)*0.5)/((T) * kB))
+  
+***************
+*** 52,67 ****
+  //!Options for the coherence simulation engine
+  coherence_OP coherence_options = {1, 1e-15, 1e-16, 7e-11, 9.8e-22, 3.8e-23, 0.0, 2.0, 80, 12.9, 11.5, EULER_METHOD, TRUE, FALSE} ;
+  
+! typedef struct
+!   {
+!   int number_of_neighbours;
+!   QCADCell **neighbours;
+!   int *neighbour_layer;
+!   double *Ek;
+!   double lambda_x;
+!   double lambda_y;
+!   double lambda_z;
+!   } coherence_model;
+  
+  #ifdef GTK_GUI
+  extern int STOP_SIMULATION;
+--- 54,71 ----
+  //!Options for the coherence simulation engine
+  coherence_OP coherence_options = {1, 1e-15, 1e-16, 7e-11, 9.8e-22, 3.8e-23, 0.0, 2.0, 80, 12.9, 11.5, EULER_METHOD, TRUE, FALSE} ;
+  
+! typedef struct {
+!     int number_of_neighbours;
+!     QCADCell **neighbours;
+!     int *neighbour_layer;
+!     double *Ek;
+!     double lambda_x;
+!     double lambda_y;
+!     double lambda_z;
+!     double polarization;
+!     unsigned int clock;
+!     int cell_function;
+! } coherence_model;
+  
+  #ifdef GTK_GUI
+  extern int STOP_SIMULATION;
+***************
+*** 84,130 ****
+  
+  static double coherence_determine_Ek (QCADCell *cell1, QCADCell *cell2, int layer_separation, coherence_OP *options);
+  static void coherence_refresh_all_Ek (int number_of_cell_layers, int *number_of_cells_in_layer, QCADCell ***sorted_cells, coherence_OP *options);
+! 
+! static void run_coherence_iteration (int sample_number, int number_of_cell_layers, int *number_of_cells_in_layer, QCADCell ***sorted_cells, int total_number_of_inputs, unsigned long int number_samples, const coherence_OP *options, simulation_data *sim_data, int SIMULATION_TYPE, VectorTable *pvt);
+! 
+  static inline double calculate_clock_value (unsigned int clock_num, unsigned long int sample, unsigned long int number_samples, int total_number_of_inputs, const coherence_OP *options, int SIMULATION_TYPE, VectorTable *pvt);
+- static inline double lambda_ss_x (double t, double PEk, double Gamma, const coherence_OP *options);
+- static inline double lambda_ss_y (double t, double PEk, double Gamma, const coherence_OP *options);
+- static inline double lambda_ss_z (double t, double PEk, double Gamma, const coherence_OP *options);
+- static inline double lambda_x_next (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options);
+- static inline double lambda_y_next (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options);
+- static inline double lambda_z_next (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options);
+- static inline double slope_x (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options);
+- static inline double slope_y (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options);
+- static inline double slope_z (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options);
+- static int compareCoherenceQCells (const void *p1, const void *p2) ;
+  
+  //-------------------------------------------------------------------//
+  // -- this is the main simulation procedure -- //
+  //-------------------------------------------------------------------//
+  simulation_data *run_coherence_simulation (int SIMULATION_TYPE, DESIGN *design, coherence_OP *options, VectorTable *pvt)
+    {
+!   int i, j, k, l, q, number_of_cell_layers, *number_of_cells_in_layer;
+!   QCADCell ***sorted_cells = NULL ;
+    int total_number_of_inputs = design->bus_layout->inputs->icUsed;
+!   unsigned long int number_samples;
+    //number of points to record in simulation results //
+    //simulations can have millions of points and there is no need to plot them all //
+!   unsigned long int number_recorded_samples = 3000;
+    unsigned long int record_interval;
+-   double PEk = 0;
+-   gboolean stable;
+-   double old_lambda_x;
+-   double old_lambda_y;
+-   double old_lambda_z;
+-   time_t start_time, end_time;
+-   simulation_data *sim_data = NULL ;
+-   // for randomization
+-   int Nix, Nix1, idxCell1, idxCell2 ;
+-   QCADCell *swap = NULL ;
+-   BUS_LAYOUT_ITER bli ;
+-   double dPolarization = 2.0 ;
+-   int idxMasterBitOrder = -1.0 ;
+  
+    STOP_SIMULATION = FALSE;
+  
+--- 88,122 ----
+  
+  static double coherence_determine_Ek (QCADCell *cell1, QCADCell *cell2, int layer_separation, coherence_OP *options);
+  static void coherence_refresh_all_Ek (int number_of_cell_layers, int *number_of_cells_in_layer, QCADCell ***sorted_cells, coherence_OP *options);
+! static void run_coherence_iteration(int sample_number, int number_of_cells, coherence_model *cell_models, int total_number_of_inputs, unsigned long int number_samples, const coherence_OP *options, simulation_data *sim_data, int SIMULATION_TYPE, VectorTable *pvt);
+! static void run_coherence_stabalization(int number_of_cells, coherence_model *cell_models, int total_number_of_inputs, unsigned long int number_samples, const coherence_OP *options, simulation_data *sim_data, int SIMULATION_TYPE, VectorTable *pvt);
+  static inline double calculate_clock_value (unsigned int clock_num, unsigned long int sample, unsigned long int number_samples, int total_number_of_inputs, const coherence_OP *options, int SIMULATION_TYPE, VectorTable *pvt);
+  
+  //-------------------------------------------------------------------//
+  // -- this is the main simulation procedure -- //
+  //-------------------------------------------------------------------//
+  simulation_data *run_coherence_simulation (int SIMULATION_TYPE, DESIGN *design, coherence_OP *options, VectorTable *pvt)
+    {
+!   int i, j, k, Nix, number_of_cell_layers, *number_of_cells_in_layer;
+! 
+!   BUS_LAYOUT_ITER bli ;
+!   double dPolarization = 2.0 ;
+!   int idxMasterBitOrder = -1.0 ;
+! 
+!   int number_of_cells;
+    int total_number_of_inputs = design->bus_layout->inputs->icUsed;
+!   time_t start_time, end_time;
+! 
+!   QCADCell ***sorted_cells = NULL ;
+!   coherence_model *cell_models;
+!   simulation_data *sim_data = NULL ;
+!   gboolean stable;
+! 
+    //number of points to record in simulation results //
+    //simulations can have millions of points and there is no need to plot them all //
+!   unsigned long int number_samples;
+!   unsigned long int number_recorded_samples = (1 << (design->bus_layout->inputs->icUsed + 1)) * 30;
+    unsigned long int record_interval;
+  
+    STOP_SIMULATION = FALSE;
+  
+***************
+*** 162,178 ****
+    // Fill in the cell arrays necessary for conducting the simulation
+    simulation_inproc_data_new (design, &number_of_cell_layers, &number_of_cells_in_layer, &sorted_cells) ;
+  
+!   // determine which cells are inputs and which are outputs //
+    for(i = 0; i < number_of_cell_layers; i++)
+!     for(j = 0; j < number_of_cells_in_layer[i]; j++)
+!       {
+!       // attach the model parameters to each of the simulation cells //
+!       sorted_cells[i][j]->cell_model = g_malloc0 (sizeof(coherence_model));
+  
+!       // -- Clear the model pointers so they are not dangling -- //
+!       ((coherence_model *)sorted_cells[i][j]->cell_model)->neighbours = NULL;
+!       ((coherence_model *)sorted_cells[i][j]->cell_model)->Ek = NULL;
+!       }
+  
+    // if we are performing a vector table simulation we consider only the activated inputs //
+    if (VECTOR_TABLE == SIMULATION_TYPE)
+--- 154,186 ----
+    // Fill in the cell arrays necessary for conducting the simulation
+    simulation_inproc_data_new (design, &number_of_cell_layers, &number_of_cells_in_layer, &sorted_cells) ;
+  
+!   // count the total number of cells
+!   number_of_cells = 0;
+    for(i = 0; i < number_of_cell_layers; i++)
+!     number_of_cells += number_of_cells_in_layer[i];
+  
+!   // allocate cell model array
+!   cell_models = (coherence_model*) g_malloc0( sizeof(coherence_model) * number_of_cells );
+! 
+!   // build cell models
+!   k = 0;
+!   for(i = 0; i < number_of_cell_layers; i++)
+!     for(j = 0; j < number_of_cells_in_layer[i]; j++) {
+!         // attach the model parameters to each of the simulation cells //
+!         sorted_cells[i][j]->cell_model = cell_models + k;
+! 
+!         // copy cell function, clock, and polarization to cell model
+!         ((coherence_model*) sorted_cells[i][j]->cell_model)->cell_function = sorted_cells[i][j]->cell_function;
+!         ((coherence_model*) sorted_cells[i][j]->cell_model)->clock = sorted_cells[i][j]->cell_options.clock;
+!         ((coherence_model*) sorted_cells[i][j]->cell_model)->polarization = qcad_cell_calculate_polarization( sorted_cells[i][j] );
+! 
+!         // -- Clear the model pointers so they are not dangling -- //
+!         ((coherence_model *)sorted_cells[i][j]->cell_model)->neighbours = NULL;
+!         ((coherence_model *)sorted_cells[i][j]->cell_model)->neighbour_layer = NULL;
+!         ((coherence_model *)sorted_cells[i][j]->cell_model)->Ek = NULL;
+! 
+!         k++;
+!     }
+  
+    // if we are performing a vector table simulation we consider only the activated inputs //
+    if (VECTOR_TABLE == SIMULATION_TYPE)
+***************
+*** 182,203 ****
+          total_number_of_inputs++ ;
+        else
+          // Kill the input flag for inactive inputs, so they may be correctly simulated
+!         exp_array_index_1d (pvt->inputs, VT_INPUT, Nix).input->cell_function = QCAD_CELL_NORMAL ;
+        }
+  
+    // write message to the command history window //
+    command_history_message ("Simulation found %d inputs %d outputs\n", total_number_of_inputs, design->bus_layout->outputs->icUsed) ;
+  
+!   // -- Allocate memory to hold the simulation data -- //
+    sim_data = g_malloc0 (sizeof(simulation_data)) ;
+- 
+-   // -- Initialize the simualtion data structure -- //
+    sim_data->number_of_traces = design->bus_layout->inputs->icUsed + design->bus_layout->outputs->icUsed;
+- 
+-   // set the number of simulation samples to be the desired number of recorded samples //
+    sim_data->number_samples = number_recorded_samples;
+- 
+-   // allocate the memory for each trace //
+    sim_data->trace = g_malloc0 (sizeof (struct TRACEDATA) * sim_data->number_of_traces);
+  
+    // create and initialize the inputs into the sim data structure //
+--- 190,205 ----
+          total_number_of_inputs++ ;
+        else
+          // Kill the input flag for inactive inputs, so they may be correctly simulated
+!         ((coherence_model*) exp_array_index_1d (pvt->inputs, VT_INPUT, Nix).input->cell_model)->cell_function = QCAD_CELL_NORMAL;
+        }
+  
+    // write message to the command history window //
+    command_history_message ("Simulation found %d inputs %d outputs\n", total_number_of_inputs, design->bus_layout->outputs->icUsed) ;
+  
+!   // build sim_data structure
+    sim_data = g_malloc0 (sizeof(simulation_data)) ;
+    sim_data->number_of_traces = design->bus_layout->inputs->icUsed + design->bus_layout->outputs->icUsed;
+    sim_data->number_samples = number_recorded_samples;
+    sim_data->trace = g_malloc0 (sizeof (struct TRACEDATA) * sim_data->number_of_traces);
+  
+    // create and initialize the inputs into the sim data structure //
+***************
+*** 235,319 ****
+        sim_data->clock_data[i].data[j] = calculate_clock_value(i, j * record_interval, number_samples, total_number_of_inputs, options, SIMULATION_TYPE, pvt);
+      }
+  
+!   // -- refresh all the kink energies and neighbours-- //
+!   coherence_refresh_all_Ek (number_of_cell_layers, number_of_cells_in_layer, sorted_cells, options);
+  
+!   // -- sort the cells with respect to the neighbour count -- //
+!   // -- this is done so that majority gates are evalulated last -- //
+!   // -- to ensure that all the signals have arrived first -- //
+!   // -- kept getting wrong answers without this -- //
+! 
+!   // The following line causes a segfault when the design consists of a single cell
+! //  printf("The Ek to the first cells neighbour is %e [eV]\n",((coherence_model *)sorted_cells[0][0]->cell_model)->Ek[0]/1.602e-19);
+! 
+!   // randomize the cells in the design as to minimize any numerical problems associated //
+!   // with having cells simulated in some predefined order: //
+!   // for each layer ...
+!   for (Nix = 0 ; Nix < number_of_cell_layers ; Nix++)
+!     // ...perform as many swaps as there are cells therein
+!     for (Nix1 = 0 ; Nix1 < number_of_cells_in_layer[Nix] ; Nix1++)
+!       {
+!       idxCell1 = rand () % number_of_cells_in_layer[Nix] ;
+!       idxCell2 = rand () % number_of_cells_in_layer[Nix] ;
+! 
+!       swap = sorted_cells[Nix][idxCell1] ;
+!       sorted_cells[Nix][idxCell1] = sorted_cells[Nix][idxCell2] ;
+!       sorted_cells[Nix][idxCell2] = swap ;
+!       }
+! 
+!   if (EXHAUSTIVE_VERIFICATION == SIMULATION_TYPE)
+!     for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!       qcad_cell_set_polarization (exp_array_index_1d (design->bus_layout->inputs, BUS_LAYOUT_CELL, i).cell, 
+!         sim_data->trace[i].data[0] = -1) ;
+!   else
+! //  if (VECTOR_TABLE == SIMULATION_TYPE)
+!     for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!       if (exp_array_index_1d (pvt->inputs, VT_INPUT, i).active_flag)
+!         qcad_cell_set_polarization (exp_array_index_1d (pvt->inputs, VT_INPUT, i).input,
+!           sim_data->trace[i].data[0] = exp_array_index_2d (pvt->vectors, gboolean, 0, i) ? 1 : -1) ;
+! 
+!   // Converge the steady state coherence vector for each cell so that the simulation starts without any transients //
+!   stable = FALSE;
+!   k = 0;
+!   while (!stable)
+!     {
+!     stable = TRUE;
+! 
+!     for (i = 0; i < number_of_cell_layers; i++)
+!       for (j = 0; j < number_of_cells_in_layer[i]; j++)
+!         {
+!         if (((QCAD_CELL_INPUT == sorted_cells[i][j]->cell_function)||
+!              (QCAD_CELL_FIXED == sorted_cells[i][j]->cell_function)))
+!           {
+!           j++;
+!           continue;
+!           }
+! 
+!         PEk = 0;
+!         // Calculate the sum of neighboring polarizations * the kink energy between them//
+!         for (q = 0; q < ((coherence_model *)sorted_cells[i][j]->cell_model)->number_of_neighbours; q++)
+!           PEk += (qcad_cell_calculate_polarization (((coherence_model *)sorted_cells[i][j]->cell_model)->neighbours[q])) * ((coherence_model *)sorted_cells[i][j]->cell_model)->Ek[q];
+! 
+!         old_lambda_x = ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_x;
+!         old_lambda_y = ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_y;
+!         old_lambda_z = ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_z;
+! 
+!         ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_x = lambda_ss_x(0, PEk, sim_data->clock_data[sorted_cells[i][j]->cell_options.clock].data[0], options);
+!         ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_y = lambda_ss_y(0, PEk, sim_data->clock_data[sorted_cells[i][j]->cell_options.clock].data[0], options);
+!         ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_z = lambda_ss_z(0, PEk, sim_data->clock_data[sorted_cells[i][j]->cell_options.clock].data[0], options);
+! 
+!         qcad_cell_set_polarization(sorted_cells[i][j], ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_z);
+! 
+!         // if the lambda values are different by more then the tolerance then they have not converged //
+!         stable =
+!           !(fabs (((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_x - old_lambda_x) > 1e-7 ||
+!             fabs (((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_y - old_lambda_y) > 1e-7 ||
+!             fabs (((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_z - old_lambda_z) > 1e-7) ;
+!         }
+!     k++;
+!     }
+  
+!   command_history_message ("It took %d iterations to converge the initial steady state polarization\n", k);
+  
+    // perform the iterations over all samples //
+    for (j = 0; j < number_samples; j++)
+--- 237,257 ----
+        sim_data->clock_data[i].data[j] = calculate_clock_value(i, j * record_interval, number_samples, total_number_of_inputs, options, SIMULATION_TYPE, pvt);
+      }
+  
+!     // -- refresh all the kink energies and neighbours-- //
+!     coherence_refresh_all_Ek (number_of_cell_layers, number_of_cells_in_layer, sorted_cells, options);
+  
+!     // set initial input polarizations
+!     if (EXHAUSTIVE_VERIFICATION == SIMULATION_TYPE)
+!         for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!             ((coherence_model*) exp_array_index_1d (design->bus_layout->inputs, BUS_LAYOUT_CELL, i).cell->cell_model)->polarization = sim_data->trace[i].data[0] = -1;
+!     else
+!     //  if (VECTOR_TABLE == SIMULATION_TYPE)
+!         for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!           if (exp_array_index_1d (pvt->inputs, VT_INPUT, i).active_flag)
+!             ((coherence_model*) exp_array_index_1d (pvt->inputs, VT_INPUT, i).input->cell_model)->polarization = sim_data->trace[i].data[0] = exp_array_index_2d (pvt->vectors, gboolean, 0, i) ? 1 : -1;
+  
+!     // Converge the steady state coherence vector for each cell so that the simulation starts without any transients //
+!     run_coherence_stabalization(number_of_cells, cell_models, total_number_of_inputs, number_samples, options, sim_data, SIMULATION_TYPE, pvt);
+  
+    // perform the iterations over all samples //
+    for (j = 0; j < number_samples; j++)
+***************
+*** 326,343 ****
+  #ifdef DESIGNER
+        if(options->animate_simulation)
+          {
+          redraw_async(NULL);
+!         gdk_flush () ;
+          }
+  #endif /* def DESIGNER */
+        }
+-       // -- for each of the inputs -- //
+  
+      if (EXHAUSTIVE_VERIFICATION == SIMULATION_TYPE)
+        for (idxMasterBitOrder = 0, design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i), idxMasterBitOrder++)
+          {
+!         qcad_cell_set_polarization (exp_array_index_1d (design->bus_layout->inputs, BUS_LAYOUT_CELL, i).cell,
+!           dPolarization = (-sin (((double) (1 << idxMasterBitOrder)) * (double) j * optimization_options.four_pi_over_number_samples)) > 0 ? 1 : -1) ;
+          if (0 == j % record_interval)
+            sim_data->trace[i].data[j/record_interval] = dPolarization ;
+          }
+--- 264,286 ----
+  #ifdef DESIGNER
+        if(options->animate_simulation)
+          {
++         // copy all cell model polarizations to the cells
++         for(i = 0; i < number_of_cell_layers; i++)
++             for(k = 0; k < number_of_cells_in_layer[i]; k++)
++                 qcad_cell_set_polarization(sorted_cells[i][k], ((coherence_model*) sorted_cells[i][k]->cell_model)->polarization);
++ 
+          redraw_async(NULL);
+!         gdk_flush ();
+          }
+  #endif /* def DESIGNER */
+        }
+  
++     // calculate inputs
+      if (EXHAUSTIVE_VERIFICATION == SIMULATION_TYPE)
+        for (idxMasterBitOrder = 0, design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i), idxMasterBitOrder++)
+          {
+!         dPolarization = (-sin (((double) (1 << idxMasterBitOrder)) * (double) j * optimization_options.four_pi_over_number_samples)) > 0 ? 1 : -1;
+!         ((coherence_model*) exp_array_index_1d (design->bus_layout->inputs, BUS_LAYOUT_CELL, i).cell->cell_model)->polarization = dPolarization;
+          if (0 == j % record_interval)
+            sim_data->trace[i].data[j/record_interval] = dPolarization ;
+          }
+***************
+*** 346,424 ****
+        for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+          if (exp_array_index_1d (pvt->inputs, VT_INPUT, i).active_flag)
+            {
+!           qcad_cell_set_polarization (exp_array_index_1d (pvt->inputs, VT_INPUT, i).input,
+!             dPolarization = exp_array_index_2d (pvt->vectors, gboolean, (j*pvt->vectors->icUsed) / number_samples, i) ? 1 : -1) ;
+            if (0 == j % record_interval)
+              sim_data->trace[i].data[j/record_interval] = dPolarization ;
+            }
+  
+!     if (0 == j % record_interval)
+!       {
+!       for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!         sim_data->trace[i].data[j/record_interval] =
+!           qcad_cell_calculate_polarization (exp_array_index_1d (design->bus_layout->inputs, BUS_LAYOUT_CELL, i).cell) ;
+!       }
+! 
+!     // Randomize cells so as to minimize numerical error
+!     if (options->randomize_cells)
+!       // for each layer ...
+!       for (Nix = 0 ; Nix < number_of_cell_layers ; Nix++)
+!         // ...perform as many swaps as there are cells therein
+!         for (Nix1 = 0 ; Nix1 < number_of_cells_in_layer[Nix] ; Nix1++)
+!           {
+!           idxCell1 = rand () % number_of_cells_in_layer[Nix] ;
+!           idxCell2 = rand () % number_of_cells_in_layer[Nix] ;
+! 
+!           swap = sorted_cells[Nix][idxCell1] ;
+!           sorted_cells[Nix][idxCell1] = sorted_cells[Nix][idxCell2] ;
+!           sorted_cells[Nix][idxCell2] = swap ;
+!           }
+  
+!     // -- run the iteration with the given clock value -- //
+!     run_coherence_iteration (j, number_of_cell_layers, number_of_cells_in_layer, sorted_cells, total_number_of_inputs, number_samples, options, sim_data, SIMULATION_TYPE, pvt);
+! 
+!     // -- Set the cell polarizations to the lambda_z value -- //
+!     for (k = 0; k < number_of_cell_layers; k++)
+!       for (l = 0; l < number_of_cells_in_layer[k]; l++)
+!         {
+!         // don't simulate the input and fixed cells //
+!         if (((QCAD_CELL_INPUT == sorted_cells[k][l]->cell_function) ||
+!              (QCAD_CELL_FIXED == sorted_cells[k][l]->cell_function)))
+!           continue;
+!         if (fabs (((coherence_model *)sorted_cells[k][l]->cell_model)->lambda_z) > 1.0)
+!           {
+!           command_history_message ("I had to abort the simulation at iteration %d because the polarization = %e was diverging.\nPossible cause is the time step is too large.\nAlternatively, you can decrease the relaxation time to reduce oscillations.\n",j, ((coherence_model *)sorted_cells[k][l]->cell_model)->lambda_z);
+!           command_history_message ("time step was set to %e\n", options->time_step);
+!           return sim_data;
+!           }
+!         qcad_cell_set_polarization (sorted_cells[k][l], ((coherence_model *)sorted_cells[k][l]->cell_model)->lambda_z);
+          }
+  
+      // -- collect all the output data from the simulation -- //
+      if (0 == j % record_interval)
+        for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_OUTPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!         sim_data->trace[total_number_of_inputs + i].data[j/record_interval] =
+!           qcad_cell_calculate_polarization (exp_array_index_1d (design->bus_layout->outputs, BUS_LAYOUT_CELL, i).cell) ;
+  
+    if (TRUE == STOP_SIMULATION) return sim_data;
+  
+    }//for number of samples
+  
+    // Free the neigbours and Ek array introduced by this simulation//
+!   for (k = 0; k < number_of_cell_layers; k++)
+!     for (l = 0; l < number_of_cells_in_layer[k]; l++)
+!       {
+!       g_free (((coherence_model *)sorted_cells[k][l]->cell_model)->neighbours);
+!       g_free (((coherence_model *)sorted_cells[k][l]->cell_model)->neighbour_layer);
+!       g_free (((coherence_model *)sorted_cells[k][l]->cell_model)->Ek);
+!       }
+  
+    simulation_inproc_data_free (&number_of_cell_layers, &number_of_cells_in_layer, &sorted_cells) ;
+  
+!   // Restore the input flag for the inactive inputs
+!   if (VECTOR_TABLE == SIMULATION_TYPE)
+!     for (i = 0 ; i < pvt->inputs->icUsed ; i++)
+!       exp_array_index_1d (pvt->inputs, BUS_LAYOUT_CELL, i).cell->cell_function = QCAD_CELL_INPUT ;
+  
+    // -- get and print the total simulation time -- //
+    if ((end_time = time (NULL)) < 0)
+--- 289,339 ----
+        for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_INPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+          if (exp_array_index_1d (pvt->inputs, VT_INPUT, i).active_flag)
+            {
+!             dPolarization = exp_array_index_2d (pvt->vectors, gboolean, (j*pvt->vectors->icUsed) / number_samples, i) ? 1 : -1;
+!             ((coherence_model*) (exp_array_index_1d( pvt->inputs, VT_INPUT, i ).input)->cell_model)->polarization = dPolarization;
+            if (0 == j % record_interval)
+              sim_data->trace[i].data[j/record_interval] = dPolarization ;
+            }
+  
+!     // run the iteration for the given sample
+!     run_coherence_iteration (j, number_of_cells, cell_models, total_number_of_inputs, number_samples, options, sim_data, SIMULATION_TYPE, pvt);
+  
+!     // -- Set the cell model polarizations to the lambda_z value -- //
+!     for( k = 0; k < number_of_cells; k++ ) {
+!         if( (cell_models[k].cell_function == QCAD_CELL_INPUT) || (cell_models[k].cell_function == QCAD_CELL_FIXED ) )
+!             continue;
+! 
+!         if( fabs(cell_models[k].lambda_z) > 1.0 ) {
+!             command_history_message ("I had to abort the simulation at iteration %d because the polarization = %e was diverging.\nPossible cause is the time step is too large.\nAlternatively, you can decrease the relaxation time to reduce oscillations.\n",j, cell_models[k].lambda_z);
+!             command_history_message ("time step was set to %e\n", options->time_step);
+!             return sim_data;
+          }
+  
++         cell_models[k].polarization = cell_models[k].lambda_z;
++     }
++ 
+      // -- collect all the output data from the simulation -- //
+      if (0 == j % record_interval)
+        for (design_bus_layout_iter_first (design->bus_layout, &bli, QCAD_CELL_OUTPUT, &i) ; i > -1 ; design_bus_layout_iter_next (&bli, &i))
+!         sim_data->trace[total_number_of_inputs + i].data[j/record_interval] = ((coherence_model*) exp_array_index_1d (design->bus_layout->outputs, BUS_LAYOUT_CELL, i).cell->cell_model)->polarization;
+  
+    if (TRUE == STOP_SIMULATION) return sim_data;
+  
+    }//for number of samples
+  
+    // Free the neigbours and Ek array introduced by this simulation//
+!   for (i = 0; i < number_of_cell_layers; i++)
+!     for (j = 0; j < number_of_cells_in_layer[i]; j++) {
+!       g_free (((coherence_model *)sorted_cells[i][j]->cell_model)->neighbours);
+!       g_free (((coherence_model *)sorted_cells[i][j]->cell_model)->neighbour_layer);
+!       g_free (((coherence_model *)sorted_cells[i][j]->cell_model)->Ek);
+!       sorted_cells[i][j]->cell_model = NULL;
+!     }
+  
+    simulation_inproc_data_free (&number_of_cell_layers, &number_of_cells_in_layer, &sorted_cells) ;
+  
+!   // free cell models
+!   g_free( cell_models );
+  
+    // -- get and print the total simulation time -- //
+    if ((end_time = time (NULL)) < 0)
+***************
+*** 427,481 ****
+    command_history_message ("Total simulation time: %g s\n", (double)(end_time - start_time));
+    set_progress_bar_visible (FALSE) ;
+    return sim_data;
+!   }//run_coherence
+  
+- // -- completes one simulation iteration performs the approximations until the entire design has stabalized -- //
+- static void run_coherence_iteration (int sample_number, int number_of_cell_layers, int *number_of_cells_in_layer, QCADCell ***sorted_cells, int total_number_of_inputs, unsigned long int number_samples, const coherence_OP *options, simulation_data *sim_data, int SIMULATION_TYPE, VectorTable *pvt)
+-   {
+-   unsigned int i,j,q;
+-   double lambda_x_new;
+-   double lambda_y_new;
+-   double lambda_z_new;
+-   double lambda_x;
+-   double lambda_y;
+-   double lambda_z;
+-   double PEk;
+-   double t;
+-   double clock_value;
+-   unsigned int num_neighbours;
+- 
+-   t = options->time_step * (double)sample_number;
+- 
+-   // loop through all the cells in the design //
+-   for (i = 0 ; i < number_of_cell_layers ; i++)
+-     for (j = 0 ; j < number_of_cells_in_layer[i] ; j++)
+-       {
+-       // don't simulate the input and fixed cells //
+-       if (((QCAD_CELL_INPUT == sorted_cells[i][j]->cell_function) ||
+-            (QCAD_CELL_FIXED == sorted_cells[i][j]->cell_function)))
+-         continue;
+- 
+-       clock_value = calculate_clock_value(sorted_cells[i][j]->cell_options.clock, sample_number, number_samples, total_number_of_inputs, options, SIMULATION_TYPE, pvt);
+- 
+-       PEk = 0;
+-       // Calculate the sum of neighboring polarizations //
+-       num_neighbours = ((coherence_model *)sorted_cells[i][j]->cell_model)->number_of_neighbours;
+-       for (q = 0 ; q < num_neighbours ; q++)
+-         PEk += (qcad_cell_calculate_polarization (((coherence_model *)sorted_cells[i][j]->cell_model)->neighbours[q]))*((coherence_model *)sorted_cells[i][j]->cell_model)->Ek[q];
+- 
+-       lambda_x = ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_x;
+-       lambda_y = ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_y;
+-       lambda_z = ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_z;
+- 
+-       lambda_x_new = lambda_x_next (t, PEk, clock_value, lambda_x, lambda_y, lambda_z, options);
+-       lambda_y_new = lambda_y_next (t, PEk, clock_value, lambda_x, lambda_y, lambda_z, options);
+-       lambda_z_new = lambda_z_next (t, PEk, clock_value, lambda_x, lambda_y, lambda_z, options);
+- 
+-       ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_x = lambda_x_new;
+-       ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_y = lambda_y_new;
+-       ((coherence_model *)sorted_cells[i][j]->cell_model)->lambda_z = lambda_z_new;
+-       }
+-   }//run_iteration
+  
+  //-------------------------------------------------------------------//
+  // -- refreshes the array of Ek values for each cell in the design this is done to speed up the simulation
+--- 342,531 ----
+    command_history_message ("Total simulation time: %g s\n", (double)(end_time - start_time));
+    set_progress_bar_visible (FALSE) ;
+    return sim_data;
+! }//run_coherence
+! 
+! 
+! static void run_coherence_stabalization(int number_of_cells, coherence_model *cell_models, int total_number_of_inputs, unsigned long int number_samples, const coherence_OP *options, simulation_data *sim_data, int SIMULATION_TYPE, VectorTable *pvt) {
+!     // optimzations and options
+!     double options_T = options->T;
+! 
+!     // solver
+!     coherence_model *cell;
+!     unsigned int i, k, q;
+!     double clock_cache[4];
+!     double clock_value;
+!     double PEk;
+!     double old_lambda_x, old_lambda_y, old_lambda_z;
+! 
+!     int* cell_indices;
+!     int iterations = 0;
+!     int stable = FALSE;
+! 
+!     // allocate cell indices array
+!     cell_indices = (int *) g_malloc0( sizeof(int) * number_of_cells );
+!     for( i = 0; i < number_of_cells; i++ ) {
+!         cell_indices[i] = i;
+!     }
+! 
+!     // fill in clock look-up table
+!     for( i = 0; i < 4; i++ ) {
+!         clock_cache[i] = calculate_clock_value(i, 0, number_samples, total_number_of_inputs, options, SIMULATION_TYPE, pvt);
+!     }
+! 
+!     // Converge the steady state coherence vector for each cell so that the simulation starts without any transients //
+!     while (!stable) {
+!         stable = TRUE;
+!         iterations++;
+! 
+!         // randomize the order in which the cells are simulated to try and minimize numerical errors
+!         // associated with the imposed simulation order (fisher-yates algorithm)
+!         for( i = number_of_cells; i--; ) {
+!             k = rand() % (i+1);
+! 
+!             q = cell_indices[k];
+!             cell_indices[k] = cell_indices[i];
+!             cell_indices[i] = q;
+!         }
+! 
+!         for (i = 0; i < number_of_cells; i++) {
+!             cell = cell_models + cell_indices[i];
+! 
+!             if ((QCAD_CELL_INPUT == cell->cell_function) || (QCAD_CELL_FIXED == cell->cell_function))
+!                 continue;
+! 
+!             PEk = 0;
+!             for (q = 0 ; q < cell->number_of_neighbours; q++)
+!                 PEk += ((coherence_model*) cell->neighbours[q]->cell_model)->polarization * cell->Ek[q];
+! 
+!             clock_value = clock_cache[cell->clock];
+! 
+!             old_lambda_x = cell->lambda_x;
+!             old_lambda_y = cell->lambda_y;
+!             old_lambda_z = cell->lambda_z;
+! 
+!             cell->lambda_x = -2.0 * clock_value * over_hbar / magnitude_energy_vector(PEk, clock_value) * tanh(temp_ratio (PEk, clock_value, options_T));
+!             cell->lambda_y = 0;
+!             cell->lambda_z = PEk * over_hbar / magnitude_energy_vector(PEk, clock_value) * tanh(temp_ratio (PEk, clock_value, options_T));
+! 
+!             cell->polarization = cell->lambda_z;
+! 
+!             // if the lambda values are different by more then the tolerance then they have not converged //
+!             stable = stable && !( (fabs( cell->lambda_x - old_lambda_x ) > CONVERGENCE_TOLERANCE) ||
+!             (fabs( cell->lambda_y - old_lambda_y ) > CONVERGENCE_TOLERANCE) ||
+!             (fabs( cell->lambda_z - old_lambda_z ) > CONVERGENCE_TOLERANCE) );
+!         }
+!     }
+! 
+!     g_free( cell_indices );
+! 
+!     command_history_message ("It took %d iterations to converge the initial steady state polarization\n", iterations);
+! }
+! 
+! // -- completes one simulation iteration
+! // if bReportStability is flagged this also returns 1 if the lambda vectors have stabalized
+! static void run_coherence_iteration(int sample_number, int number_of_cells, coherence_model *cell_models, int total_number_of_inputs, unsigned long int number_samples, const coherence_OP *options, simulation_data *sim_data, int SIMULATION_TYPE, VectorTable *pvt) {
+!     // optimzations and options
+!     double optimization_options_hbar_over_kBT = optimization_options.hbar_over_kBT;
+!     double options_relaxation = options->relaxation;
+!     double options_time_step = options->time_step;
+! 
+!     // solver
+!     coherence_model *cell;
+!     unsigned int i, q;
+!     double clock_cache[4];
+!     double clock_value;
+!     double PEk;
+!     double lambda_x, lambda_y, lambda_z;
+!     double mag;
+!     double k1, k2, k3, k4; // for rk4
+!     double t1, t2; // temp
+! 
+!     // fill in clock look-up table
+!     for( i = 0; i < 4; i++ ) {
+!         clock_cache[i] = calculate_clock_value(i, sample_number, number_samples, total_number_of_inputs, options, SIMULATION_TYPE, pvt);
+!     }
+! 
+!     // optimization
+!     t1 = -options_time_step / options_relaxation;
+! 
+!     // loop through all the cells in the design //
+!     if (options->algorithm == EULER_METHOD) {
+!         for( i = 0; i < number_of_cells; i++ ) {
+!             cell = cell_models + i;
+! 
+!             PEk = 0;
+!             for (q = 0 ; q < cell->number_of_neighbours; q++)
+!                 PEk += ((coherence_model*) cell->neighbours[q]->cell_model)->polarization * cell->Ek[q];
+! 
+!             // get clock for this cell
+!             clock_value = clock_cache[ cell->clock ];
+! 
+!             // Compute Magnitude
+!             mag = magnitude_energy_vector (PEk, clock_value);
+!             mag = tanh (optimization_options_hbar_over_kBT * mag) / mag; // optimization
+!             clock_value += clock_value;  // more optimization
+! 
+!             // Get lambda vector
+!             lambda_x = cell->lambda_x;
+!             lambda_y = cell->lambda_y;
+!             lambda_z = cell->lambda_z;
+! 
+!             // Calculate labmda vector
+!             cell->lambda_x += t1 * ((clock_value * over_hbar * mag + lambda_x) - options_relaxation * (PEk * lambda_y * over_hbar));
+!             cell->lambda_y += t1 * over_hbar * (options_relaxation * (PEk * lambda_x + clock_value * lambda_z) + hbar * lambda_y);
+!             cell->lambda_z += -t1 * over_hbar * (PEk * mag + clock_value * options_relaxation * lambda_y - hbar * lambda_z);
+!         }
+!     } else if (options->algorithm == RUNGE_KUTTA) {
+!          for( i = 0; i < number_of_cells; i++ ) {
+!             cell = cell_models + i;
+! 
+!             PEk = 0;
+!             for (q = 0 ; q < cell->number_of_neighbours; q++)
+!                 PEk += ((coherence_model*) cell->neighbours[q]->cell_model)->polarization * cell->Ek[q];
+! 
+!             // Generate clock
+!             clock_value = clock_cache[ cell->clock ];
+! 
+!             // Compute magnitude
+!             mag = magnitude_energy_vector (PEk, clock_value);
+!             mag = tanh (optimization_options_hbar_over_kBT * mag) / mag; // optimization
+!             clock_value += clock_value;  // more optimization
+! 
+!             // Get lambda vector
+!             lambda_x = cell->lambda_x;
+!             lambda_y = cell->lambda_y;
+!             lambda_z = cell->lambda_z;
+! 
+!             // lambda_x
+!             t2 = over_hbar * (clock_value * mag - PEk * lambda_y * options_relaxation) + lambda_x;
+!             k1 = t1 * t2;
+!             k2 = t1 * (t2 + k1/2);
+!             k3 = t1 * (t2 + k2/2);
+!             k4 = t1 * (t2 + k3);
+!             cell->lambda_x = lambda_x + k1/6 + k2/3 + k3/3 + k4/6;
+! 
+!              // lambda_y
+!             t2 = options_relaxation * over_hbar * (PEk * lambda_x + clock_value * lambda_z) + lambda_y;
+!             k1 = t1 * t2;
+!             k2 = t1 * (t2 + k1/2);
+!             k3 = t1 * (t2 + k2/2);
+!             k4 = t1 * (t2 + k3);
+!             cell->lambda_y = lambda_y + k1/6 + k2/3 + k3/3 + k4/6;
+! 
+!             // lambda_z
+!             t2 = lambda_z - over_hbar * ( PEk * mag + clock_value * options_relaxation * lambda_y );
+!             k1 = t1 * t2;
+!             k2 = t1 * (t2 + k1/2);
+!             k3 = t1 * (t2 + k2/2);
+!             k4 = t1 * (t2 + k3);
+!             cell->lambda_z = lambda_z + k1/6 + k2/3 + k3/3 + k4/6;
+!         }
+!     } else {
+!         command_history_message ("coherence vector undefined algorithm\n");
+!         return 0;
+!     }
+! } // run_iteration
+  
+  
+  //-------------------------------------------------------------------//
+  // -- refreshes the array of Ek values for each cell in the design this is done to speed up the simulation
+***************
+*** 491,503 ****
+    for(i = 0 ; i < number_of_cell_layers ; i++)
+      for(j = 0 ; j < number_of_cells_in_layer[i] ; j++)
+        {
+!       // free up memory from previous simulations //
+!       g_free ((cell_model = (coherence_model *)sorted_cells[i][j]->cell_model)->neighbours);
+!       g_free (cell_model->Ek);
+!       g_free (cell_model->neighbour_layer);
+!       cell_model->neighbours = NULL;
+!       cell_model->neighbour_layer = NULL;
+!       cell_model->Ek = NULL;
+  
+        // select all neighbours within the provided radius //
+        cell_model->number_of_neighbours = icNeighbours =
+--- 541,547 ----
+    for(i = 0 ; i < number_of_cell_layers ; i++)
+      for(j = 0 ; j < number_of_cells_in_layer[i] ; j++)
+        {
+!       cell_model = (coherence_model *)sorted_cells[i][j]->cell_model;
+  
+        // select all neighbours within the provided radius //
+        cell_model->number_of_neighbours = icNeighbours =
+***************
+*** 590,701 ****
+    return clock;
+    }// calculate_clock_value
+  
+- //-------------------------------------------------------------------//
+- 
+- // Next value of lambda x with choice of algorithm
+- static inline double lambda_x_next (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options)
+-   {
+-   double k1 = options->time_step * slope_x (t, PEk, Gamma, lambda_x, lambda_y, lambda_z, options);
+-   double k2, k3, k4;
+- 
+-   if (RUNGE_KUTTA == options->algorithm)
+-     {
+-     k2 = options->time_step * slope_x (t, PEk, Gamma, lambda_x + k1/2, lambda_y, lambda_z, options);
+-     k3 = options->time_step * slope_x (t, PEk, Gamma, lambda_x + k2/2, lambda_y, lambda_z, options);
+-     k4 = options->time_step * slope_x (t, PEk, Gamma, lambda_x + k3,   lambda_y, lambda_z, options);
+-     return lambda_x + k1/6 + k2/3 + k3/3 + k4/6;
+-     }
+-   else
+-   if (EULER_METHOD == options->algorithm)
+-     return lambda_x + k1;
+-   else
+-     command_history_message ("coherence vector undefined algorithm\n");
+- 
+-   return 0;
+-   }
+- 
+- // Next value of lambda y with choice of algorithm
+- static inline double lambda_y_next (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options)
+-   {
+-   double k1 = options->time_step * slope_y (t, PEk, Gamma, lambda_x, lambda_y, lambda_z, options);
+-   double k2, k3, k4;
+- 
+-   if (RUNGE_KUTTA == options->algorithm)
+-     {
+-     k2 = options->time_step * slope_y (t, PEk, Gamma, lambda_x, lambda_y + k1/2, lambda_z, options);
+-     k3 = options->time_step * slope_y (t, PEk, Gamma, lambda_x, lambda_y + k2/2, lambda_z, options);
+-     k4 = options->time_step * slope_y (t, PEk, Gamma, lambda_x, lambda_y + k3,   lambda_z, options);
+-     return lambda_y + k1/6 + k2/3 + k3/3 + k4/6;
+-     }
+-   else
+-   if (EULER_METHOD == options->algorithm)
+-     return lambda_y + k1;
+-   else
+-     command_history_message("coherence vector undefined algorithm\n");
+- 
+-   return 0;
+-   }
+- 
+- // Next value of lambda z with choice of algorithm
+- static inline double lambda_z_next (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options)
+-   {
+-   double k1 = options->time_step * slope_z (t, PEk, Gamma, lambda_x, lambda_y, lambda_z, options);
+-   double k2, k3, k4;
+- 
+-   if (RUNGE_KUTTA == options->algorithm)
+-     {
+-     k2 = options->time_step * slope_z(t, PEk, Gamma, lambda_x, lambda_y, lambda_z + k1/2, options);
+-     k3 = options->time_step * slope_z(t, PEk, Gamma, lambda_x, lambda_y, lambda_z + k2/2, options);
+-     k4 = options->time_step * slope_z(t, PEk, Gamma, lambda_x, lambda_y, lambda_z + k3,   options);
+-     return lambda_z + k1/6 + k2/3 + k3/3 + k4/6;
+-     }
+-   else
+-   if (EULER_METHOD == options->algorithm)
+-     return lambda_z + k1;
+-   else
+-     command_history_message("coherence vector undefined algorithm\n");
+- 
+-   return 0;
+-   }
+- 
+- static inline double slope_x (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options)
+-   {
+-   double mag = magnitude_energy_vector (PEk, Gamma);
+-   return (-(2.0 * Gamma * over_hbar / mag * tanh (optimization_options.hbar_over_kBT * mag) + lambda_x) / options->relaxation + (PEk * lambda_y * over_hbar));
+-   }
+- 
+- static inline double slope_y (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options)
+-   {return -(options->relaxation * (PEk * lambda_x + 2.0 * Gamma * lambda_z) + hbar * lambda_y) / (options->relaxation * hbar);}
+- 
+- static inline double slope_z (double t, double PEk, double Gamma, double lambda_x, double lambda_y, double lambda_z, const coherence_OP *options)
+-   {
+-   double mag = magnitude_energy_vector (PEk, Gamma);
+-   return (PEk * tanh (optimization_options.hbar_over_kBT * mag) + mag * (2.0 * Gamma * options->relaxation * lambda_y - hbar * lambda_z)) / (options->relaxation * hbar * mag);
+-   }
+- 
+- //-------------------------------------------------------------------------------------------------------------------------//
+- 
+- // Steady-State Coherence Vector X component
+- static inline double lambda_ss_x(double t, double PEk, double Gamma, const coherence_OP *options)
+-   {return -2.0 * Gamma * over_hbar / magnitude_energy_vector(PEk, Gamma) * tanh (temp_ratio (PEk, Gamma, options->T));}
+- 
+- // Steady-State Coherence Vector y component
+- static inline double lambda_ss_y (double t, double PEk, double Gamma, const coherence_OP *options)
+-   {return 0.0;}
+- 
+- // Steady-State Coherence Vector Z component
+- static inline double lambda_ss_z(double t, double PEk, double Gamma, const coherence_OP *options)
+-   {return PEk * over_hbar / magnitude_energy_vector (PEk, Gamma) * tanh (temp_ratio (PEk, Gamma, options->T));}
+- 
+- static int compareCoherenceQCells (const void *p1, const void *p2)
+-   {
+-   return
+-     ((coherence_model *)((*((QCADCell **)(p1)))->cell_model))->number_of_neighbours >
+-     ((coherence_model *)((*((QCADCell **)(p2)))->cell_model))->number_of_neighbours ?  1 :
+-     ((coherence_model *)((*((QCADCell **)(p1)))->cell_model))->number_of_neighbours <
+-     ((coherence_model *)((*((QCADCell **)(p2)))->cell_model))->number_of_neighbours ? -1 : 0 ;
+-   }//compareSortStructs
+- 
+  void coherence_options_dump (coherence_OP *coherence_options, FILE *pfile)
+    {
+    fprintf (stderr, "coherence_options_dump:\n") ;
+--- 634,639 ----
+diff -r -c src_orig//custom_widgets.c src_pristine//custom_widgets.c
+*** src_orig//custom_widgets.c	2005-07-26 04:42:23.000000000 -0400
+--- src_pristine//custom_widgets.c	2011-06-30 00:46:25.609496103 -0400
+***************
+*** 505,511 ****
+    return ;
+    }
+  #else
+!   double dRange = dUpper - dLower ;
+    int iPowerOfTen = ceil (log10 (dRange)), Nix = 0, iPowerOfDivisor = 0 ;
+    double dScale = pow (10, iPowerOfTen) ;
+  
+--- 505,512 ----
+    return ;
+    }
+  #else
+!   // This causes segfaults and seems to be broken in the latest version of GTK
+!   /*double dRange = dUpper - dLower ;
+    int iPowerOfTen = ceil (log10 (dRange)), Nix = 0, iPowerOfDivisor = 0 ;
+    double dScale = pow (10, iPowerOfTen) ;
+  
+***************
+*** 522,528 ****
+      iPowerOfDivisor %= NUMBER_OF_RULER_SUBDIVISIONS ;
+      if (0 == iPowerOfDivisor)
+        dScale = pow (10, floor (log10 (dScale / NUMBER_OF_RULER_SUBDIVISIONS))) ;
+!     }
+    }
+  #endif /* WIN32 => Don't set_ruler_scale */
+  
+--- 523,529 ----
+      iPowerOfDivisor %= NUMBER_OF_RULER_SUBDIVISIONS ;
+      if (0 == iPowerOfDivisor)
+        dScale = pow (10, floor (log10 (dScale / NUMBER_OF_RULER_SUBDIVISIONS))) ;
+!     }*/
+    }
+  #endif /* WIN32 => Don't set_ruler_scale */
+  
+diff -r -c src_orig//exp_array.c src_pristine//exp_array.c
+*** src_orig//exp_array.c	2005-07-14 21:41:33.000000000 -0400
+--- src_pristine//exp_array.c	2011-06-29 23:44:51.934337119 -0400
+***************
+*** 157,165 ****
+        (exp_array->icUsed - idx) * cbSize) ;
+  
+    if (NULL != data)
+!     memcpy (exp_array->data + idx * cbSize, data, icElements * cbSize) ;
+    else
+!     memset (exp_array->data + idx * cbSize, 0, icElements * cbSize) ;
+    exp_array->icUsed += icElements ;
+    }
+  
+--- 157,165 ----
+        (exp_array->icUsed - idx) * cbSize) ;
+  
+    if (NULL != data)
+!     memcpy (&(((char *)(exp_array->data))[(idx) * cbSize]), data, icElements * cbSize) ;
+    else
+!     memset (&(((char *)(exp_array->data))[(idx) * cbSize]), 0, icElements * cbSize) ;
+    exp_array->icUsed += icElements ;
+    }
+  
+***************
+*** 180,185 ****
+--- 180,186 ----
+    EXP_ARRAY *child = NULL ;
+    gboolean bEnd = FALSE ;
+    int icElements = -1 ;
++   int cbSize = (exp_array->icDimensions > 1 ? sizeof (EXP_ARRAY *) : exp_array->cbSize) ;
+    va_list xa ;
+  
+    idx = va_arg (va, int) ;
+***************
+*** 230,238 ****
+    if (exp_array->icUsed > 0)
+      {
+      if (idx + icElements < exp_array->icUsed)
+!       memmove (exp_array->data + (      idx          * exp_array->cbSize),
+!                exp_array->data + ((idx + icElements) * exp_array->cbSize),
+!               (exp_array->icUsed - idx - icElements) * exp_array->cbSize) ;
+      exp_array->icUsed -= icElements ;
+      }
+  
+--- 231,239 ----
+    if (exp_array->icUsed > 0)
+      {
+      if (idx + icElements < exp_array->icUsed)
+!       memmove (&(((char *)(exp_array->data))[(idx) * cbSize]),
+!                &(((char *)(exp_array->data))[(idx+icElements) * cbSize]),
+!               (exp_array->icUsed - idx - icElements) * cbSize) ;
+      exp_array->icUsed -= icElements ;
+      }
+  
+diff -r -c src_orig//exp_array.h src_pristine//exp_array.h
+*** src_orig//exp_array.h	2005-06-27 20:44:53.000000000 -0400
+--- src_pristine//exp_array.h	2011-06-23 13:31:41.000000000 -0400
+***************
+*** 37,43 ****
+  
+  typedef struct
+    {
+!   void *data ;
+    int icUsed ;
+    int icAvail ;
+    int cbSize ;
+--- 37,43 ----
+  
+  typedef struct
+    {
+!   unsigned char *data ; // this is more ANSI C compliant than a void*
+    int icUsed ;
+    int icAvail ;
+    int cbSize ;
+diff -r -c src_orig//objects/QCADCell.c src_pristine//objects/QCADCell.c
+*** src_orig//objects/QCADCell.c	2005-07-04 20:14:48.000000000 -0400
+--- src_pristine//objects/QCADCell.c	2011-06-29 23:49:33.524730415 -0400
+***************
+*** 1529,1535 ****
+    gtk_container_add (GTK_CONTAINER (dialog->fmFixed), tblFm) ;
+    gtk_container_set_border_width (GTK_CONTAINER (tblFm), 2) ;
+  
+!   dialog->adjPolarization = GTK_ADJUSTMENT (gtk_adjustment_new (0.00, -1.00, 1.00, 0.0001, 0.1, 0.1)) ;
+    dialog->spnPolarization = gtk_spin_button_new (dialog->adjPolarization, 0.0001, 4) ;
+    gtk_widget_show (dialog->spnPolarization) ;
+    gtk_table_attach (GTK_TABLE (tblFm), dialog->spnPolarization, 0, 1, 0, 1,
+--- 1529,1536 ----
+    gtk_container_add (GTK_CONTAINER (dialog->fmFixed), tblFm) ;
+    gtk_container_set_border_width (GTK_CONTAINER (tblFm), 2) ;
+  
+!   // The last argument of this should always be zero to prevent a GTK warning
+!   dialog->adjPolarization = GTK_ADJUSTMENT (gtk_adjustment_new (0.00, -1.00, 1.00, 0.0001, 0.1, 0)) ;
+    dialog->spnPolarization = gtk_spin_button_new (dialog->adjPolarization, 0.0001, 4) ;
+    gtk_widget_show (dialog->spnPolarization) ;
+    gtk_table_attach (GTK_TABLE (tblFm), dialog->spnPolarization, 0, 1, 0, 1,
+diff -r -c src_orig//objects/QCADTreeViewContainer.c src_pristine//objects/QCADTreeViewContainer.c
+*** src_orig//objects/QCADTreeViewContainer.c	2005-07-15 15:49:15.000000000 -0400
+--- src_pristine//objects/QCADTreeViewContainer.c	2011-06-30 00:13:09.576708224 -0400
+***************
+*** 54,68 ****
+    {
+    static GType tvc_type = 0 ;
+  
+!   if (0 == tvc_type)
+      {
+!     static GTypeInfo tvc_info = 
+        {
+        sizeof (QCADTreeViewContainerClass),
+!       NULL,
+!       NULL,
+        (GClassInitFunc)qcad_tree_view_container_class_init,
+!       NULL,
+        NULL,
+        sizeof (QCADTreeViewContainer),
+        0,
+--- 54,68 ----
+    {
+    static GType tvc_type = 0 ;
+  
+!   if (!tvc_type)
+      {
+!     static const GTypeInfo tvc_info =
+        {
+        sizeof (QCADTreeViewContainerClass),
+!       (GBaseInitFunc)NULL,
+!       (GBaseFinalizeFunc)NULL,
+        (GClassInitFunc)qcad_tree_view_container_class_init,
+!       (GClassFinalizeFunc)NULL,
+        NULL,
+        sizeof (QCADTreeViewContainer),
+        0,
+***************
+*** 71,84 ****
+  
+      if ((tvc_type = g_type_register_static (GTK_TYPE_SCROLLED_WINDOW, QCAD_TYPE_STRING_TREE_VIEW_CONTAINER, &tvc_info, 0)))
+        g_type_class_ref (tvc_type) ;
+      }
+    return tvc_type ;
+    }
+  
+  static void qcad_tree_view_container_class_init (QCADTreeViewContainerClass *klass)
+    {
+    GTK_CONTAINER_CLASS (klass)->add = qcad_tree_view_container_add ;
+!   G_OBJECT_CLASS (g_type_class_peek (QCAD_TYPE_TREE_VIEW_CONTAINER))->finalize = qcad_tree_view_container_instance_finalize ;
+    }
+  
+  static void qcad_tree_view_container_instance_init (QCADTreeViewContainer *tvc)
+--- 71,86 ----
+  
+      if ((tvc_type = g_type_register_static (GTK_TYPE_SCROLLED_WINDOW, QCAD_TYPE_STRING_TREE_VIEW_CONTAINER, &tvc_info, 0)))
+        g_type_class_ref (tvc_type) ;
++ 
+      }
++ 
+    return tvc_type ;
+    }
+  
+  static void qcad_tree_view_container_class_init (QCADTreeViewContainerClass *klass)
+    {
+    GTK_CONTAINER_CLASS (klass)->add = qcad_tree_view_container_add ;
+!   G_OBJECT_CLASS (klass)->finalize = qcad_tree_view_container_instance_finalize ;
+    }
+  
+  static void qcad_tree_view_container_instance_init (QCADTreeViewContainer *tvc)
